@@ -1,0 +1,9 @@
+/vendor
+/tests
+/src/ApiRequestHandler.php
+/src/ConfigManager.php
+/src/DataCompressor.php
+/src/ErrorHandler.php
+/src/FormatHandler.php
+/src/Logger.php
+/src/RateLimiter.php
