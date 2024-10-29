@@ -1,5 +1,5 @@
 <?php
-namespace StashQuiver\ApiRequestHandler;
+namespace StashQuiver;
 
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
