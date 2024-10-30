@@ -1,7 +1,6 @@
 /vendor
 /tests
 /src/ConfigManager.php
-/src/DataCompressor.php
 /src/FormatHandler.php
 /src/Logger.php
 /src/RateLimiter.php

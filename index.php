@@ -2,36 +2,21 @@
 
 require 'vendor/autoload.php';
 
-// use StashQuiver\CacheManager;
+use StashQuiver\DataCompressor;
 
-// $cache = new CacheManager();
-// $cache->store('user_123', ['name' => 'John Doe', 'email' => 'john@example.com'], 600);
+$dataCompressor = new DataCompressor;
 
-// $userData = $cache->retrieve('user_123');
+// Original data (e.g., an API response)
+$data = [
+    'name' => 'John Doe',
+    'email' => 'john@example.com',
+    'roles' => ['admin', 'editor']
+];
 
-// if ($userData) {
+// Compress the data
+$compressedData = $dataCompressor->compress($data);
+echo "Compressed Data: " . $compressedData . "\n";
 
-//     echo "Cached data: " . print_r($userData, true);
-
-// } else {
-
-//     echo "No cache found or data expired.";
-    
-// }
-
-// $cache->clear('user_123'); // to clear single cache
-
-// $cache->clear(); // to clear all cache
-
-
-use StashQuiver\ApiRequestHandler;
-
-$requestHandler = new ApiRequestHandler();
-
-// Making a GET request
-$response = $requestHandler->makeRequest(
-    'https://catfact.ninja/fact',
-    'GET',
-);
-
-echo $response;
+// Decompress the data
+$decompressedData = $dataCompressor->decompress($compressedData);
+print_r($decompressedData);
