@@ -1,24 +1,34 @@
 <?php
 namespace StashQuiver;
 
+use StashQuiver\DataCompressor;
+
 class CacheManager
 {
     private $cache = [];
     private $maxSize;
+    private $dataCompressor;
 
-    public function __construct($maxSize = null)
+    public function __construct($maxSize = null, DataCompressor $dataCompressor = null)
     {
         $this->maxSize = $maxSize;
+        $this->dataCompressor = $dataCompressor ?? new DataCompressor();
     }
 
     /**
+     * Stores compressed data in the cache with an expiration time.
+     * 
      * @param string $key Unique identifier for the cache entry.
      * @param mixed $data Data to cache (can be any format).
      * @param int $expiration Expiration time in seconds (defaults to 1 hour).
      */
     public function store($key, $data, $expiration = 3600)
     {
-        // If cache has maxSize and is at capacity, evict oldest entry (still optional) [ to be reviewed ]
+        if ($this->dataCompressor) {
+            $data = $this->dataCompressor->compress($data);
+        }
+
+        // Evict if max size reached
         if ($this->maxSize && count($this->cache) >= $this->maxSize) {
             $this->evictOldest();
         }
@@ -30,6 +40,8 @@ class CacheManager
     }
 
     /**
+     * Retrieves decompressed cached data by key if it's still valid.
+     * 
      * @param string $key The unique identifier for the cache entry.
      * @return mixed|null The cached data if valid, or null if expired/not found.
      */
@@ -39,7 +51,7 @@ class CacheManager
             $entry = $this->cache[$key];
 
             if ($entry['expires_at'] >= time()) {
-                return $entry['data'];
+                return $this->dataCompressor ? $this->dataCompressor->decompress($entry['data']) : $entry['data'];
             }
 
             // Expired entry, remove it
@@ -50,6 +62,8 @@ class CacheManager
     }
 
     /**
+     * Clears a specific cache entry or all entries.
+     * 
      * @param string|null $key The cache key to clear; clears all if null.
      */
     public function clear($key = null)
@@ -62,7 +76,7 @@ class CacheManager
     }
 
     /**
-     * Optionally evicts the oldest cache entry if maxSize is reached.
+     * Evicts the oldest cache entry if maxSize is reached.
      */
     private function evictOldest()
     {
