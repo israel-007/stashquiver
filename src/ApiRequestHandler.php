@@ -1,6 +1,7 @@
 <?php
 namespace StashQuiver;
 
+use StashQuiver\RateLimiter;
 use StashQuiver\ErrorHandler;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
@@ -13,37 +14,26 @@ class ApiRequestHandler
     private $apiKey;
     private $useGuzzle;
     private $errorHandler;
+    private $rateLimiter;
 
-    public function __construct($apiKey = null, $useGuzzle = false, $retryLimit = 3, $fallbackResponse = 'Fallback Response')
+    public function __construct($apiKey = null, $useGuzzle = false, $retryLimit = 3, $fallbackResponse = 'Fallback Response', RateLimiter $rateLimiter = null)
     {
         $this->apiKey = $apiKey;
         $this->useGuzzle = $useGuzzle;
 
-        // Initialize Guzzle client if available
         if ($useGuzzle && class_exists(Client::class)) {
             $this->client = new Client();
         }
 
-        // Set up internal logging with Monolog
         $logger = new Logger('APIStash');
         $logger->pushHandler(new StreamHandler(__DIR__ . '/../../logs/api_stash.log', Logger::ERROR));
 
-        // Initialize ErrorHandler with logger, retry limit, and fallback response
         $this->errorHandler = new ErrorHandler($logger, $retryLimit, $fallbackResponse);
+        $this->rateLimiter = $rateLimiter ?? new RateLimiter(60, 60); // Default 60 requests per minute
     }
 
     /**
-     * Sets an API key for requests that require authorization.
-     * 
-     * @param string $apiKey API key to be added to requests.
-     */
-    public function setApiKey($apiKey)
-    {
-        $this->apiKey = $apiKey;
-    }
-
-    /**
-     * Makes a single API request with retry logic.
+     * Makes a single API request with retry and rate limit logic.
      * 
      * @param string $url API endpoint.
      * @param string $method HTTP method (GET, POST, etc.).
@@ -51,10 +41,14 @@ class ApiRequestHandler
      * @param array $headers Request headers.
      * @param mixed $body Request body data.
      * @return mixed API response data or fallback response.
-     * @throws \Exception if request fails after all retries.
+     * @throws \Exception if request fails after all retries or rate limit exceeded.
      */
     public function makeRequest($url, $method = 'GET', $params = [], $headers = [], $body = null)
     {
+        if (!$this->rateLimiter->allowRequest()) {
+            throw new \Exception("Rate limit exceeded. Please wait before making more requests.");
+        }
+
         $urlWithQuery = $url . '?' . http_build_query($params);
 
         if ($this->apiKey) {
@@ -71,7 +65,6 @@ class ApiRequestHandler
             }
         };
 
-        // Use ErrorHandler to retry the request in case of failure
         return $this->errorHandler->retry($callback);
     }
 
