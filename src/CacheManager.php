@@ -5,93 +5,146 @@ use StashQuiver\DataCompressor;
 
 class CacheManager
 {
-    private $cache = [];
+    private $cacheDir;
     private $maxSize;
     private $dataCompressor;
 
-    public function __construct($maxSize = null, DataCompressor $dataCompressor = null)
+    /**
+     * Initializes the CacheManager with file-based caching.
+     * 
+     * @param string $cacheDir The directory where cache files will be stored.
+     * @param int|null $maxSize The maximum number of entries allowed in the cache.
+     * @param DataCompressor|bool $dataCompressor An optional DataCompressor instance for compressing cached data.
+     */
+    public function __construct($dataCompressor = true, $maxSize = 20, $cacheDir = __DIR__ . '/cache')
     {
+        $this->cacheDir = rtrim($cacheDir, DIRECTORY_SEPARATOR);
         $this->maxSize = $maxSize;
-        $this->dataCompressor = $dataCompressor ?? new DataCompressor();
+        $this->dataCompressor = ($dataCompressor) ? new DataCompressor() : false;
+
+        if (!is_dir($this->cacheDir)) {
+            mkdir($this->cacheDir, 0755, true);
+        }
     }
 
     /**
-     * Stores compressed data in the cache with an expiration time.
+     * Stores data in a file-based cache with an expiration time.
      * 
      * @param string $key Unique identifier for the cache entry.
-     * @param mixed $data Data to cache (can be any format).
-     * @param int $expiration Expiration time in seconds (defaults to 1 hour).
+     * @param mixed $data Data to cache.
+     * @param int $expiration Expiration time in seconds.
      */
     public function store($key, $data, $expiration = 3600)
     {
+        $filePath = $this->getFilePath($key);
+        $expiresAt = time() + $expiration;
+
+        // Prepare the cache entry as JSON before compression
+        $cacheEntry = json_encode(['data' => $data, 'expires_at' => $expiresAt]);
+        if ($cacheEntry === false) {
+            throw new \RuntimeException("Failed to encode cache data for key: $key");
+        }
+
+        // Compress the JSON-encoded cache entry if DataCompressor is enabled
         if ($this->dataCompressor) {
-            $data = $this->dataCompressor->compress($data);
+            $cacheEntry = $this->dataCompressor->compress($cacheEntry);
+            if ($cacheEntry === false) {
+                throw new \RuntimeException("Failed to compress data for key: $key");
+            }
         }
 
-        // Evict if max size reached
-        if ($this->maxSize && count($this->cache) >= $this->maxSize) {
-            $this->evictOldest();
+        // Write the compressed data to the cache file
+        $result = file_put_contents($filePath, $cacheEntry);
+        if ($result === false) {
+            throw new \RuntimeException("Failed to write cache file for key: $key at path: $filePath");
         }
 
-        $this->cache[$key] = [
-            'data' => $data,
-            'expires_at' => time() + $expiration
-        ];
+        // Evict old entries if maxSize is defined
+        if ($this->maxSize) {
+            $this->evictOldEntries();
+        }
     }
 
     /**
-     * Retrieves decompressed cached data by key if it's still valid.
+     * Retrieves cached data from a file if it exists and is not expired.
      * 
      * @param string $key The unique identifier for the cache entry.
      * @return mixed|null The cached data if valid, or null if expired/not found.
      */
     public function retrieve($key)
     {
-        if (isset($this->cache[$key])) {
-            $entry = $this->cache[$key];
+        $filePath = $this->getFilePath($key);
 
-            if ($entry['expires_at'] >= time()) {
-                return $this->dataCompressor ? $this->dataCompressor->decompress($entry['data']) : $entry['data'];
-            }
-
-            // Expired entry, remove it
-            unset($this->cache[$key]);
+        if (!file_exists($filePath)) {
+            return null; // Cache miss
         }
 
-        return null; // Cache miss or expired
+        // Read the file and decompress if necessary
+        $cacheEntry = file_get_contents($filePath);
+        if ($this->dataCompressor) {
+            $cacheEntry = $this->dataCompressor->decompress($cacheEntry);
+            if ($cacheEntry === false) {
+                unlink($filePath); // Remove corrupted entry
+                return null;
+            }
+        }
+
+        // Decode the JSON data after decompression
+        $cacheEntry = json_decode($cacheEntry, true);
+        if ($cacheEntry === null || !isset($cacheEntry['expires_at']) || $cacheEntry['expires_at'] < time()) {
+            unlink($filePath); // Remove expired or invalid entry
+            return null;
+        }
+
+        return $cacheEntry['data'];
     }
 
     /**
-     * Clears a specific cache entry or all entries.
+     * Clears a specific cache entry or all entries in the cache directory.
      * 
      * @param string|null $key The cache key to clear; clears all if null.
      */
     public function clear($key = null)
     {
         if ($key) {
-            unset($this->cache[$key]);
+            $filePath = $this->getFilePath($key);
+            if (file_exists($filePath)) {
+                unlink($filePath);
+            }
         } else {
-            $this->cache = [];
+            array_map('unlink', glob("{$this->cacheDir}/*"));
         }
     }
 
     /**
-     * Evicts the oldest cache entry if maxSize is reached.
+     * Evicts oldest entries if the maxSize limit is reached.
      */
-    private function evictOldest()
+    private function evictOldEntries()
     {
-        $oldestKey = null;
-        $oldestTime = time();
+        $files = glob("{$this->cacheDir}/*");
 
-        foreach ($this->cache as $key => $entry) {
-            if ($entry['expires_at'] < $oldestTime) {
-                $oldestTime = $entry['expires_at'];
-                $oldestKey = $key;
-            }
+        if (count($files) <= $this->maxSize) {
+            return;
         }
 
-        if ($oldestKey !== null) {
-            unset($this->cache[$oldestKey]);
+        usort($files, function ($a, $b) {
+            return filemtime($a) - filemtime($b);
+        });
+
+        $filesToDelete = array_slice($files, 0, count($files) - $this->maxSize);
+        foreach ($filesToDelete as $file) {
+            unlink($file);
         }
+    }
+
+    /**
+     * Generates a unique file path for a given cache key.
+     * 
+     * @param string $key The cache key.
+     * @return string The file path for storing the cache entry.
+     */
+    private function getFilePath($key)
+    {
+        return $this->cacheDir . DIRECTORY_SEPARATOR . md5($key) . '.cache';
     }
 }
