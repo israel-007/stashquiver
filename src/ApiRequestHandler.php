@@ -1,23 +1,35 @@
 <?php
 namespace StashQuiver;
 
+use StashQuiver\ErrorHandler;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\RequestException;
+use Monolog\Logger;
+use Monolog\Handler\StreamHandler;
 
 class ApiRequestHandler
 {
     private $client;
     private $apiKey;
     private $useGuzzle;
+    private $errorHandler;
 
-    public function __construct($apiKey = null, $useGuzzle = false)
+    public function __construct($apiKey = null, $useGuzzle = false, $retryLimit = 3, $fallbackResponse = 'Fallback Response')
     {
         $this->apiKey = $apiKey;
         $this->useGuzzle = $useGuzzle;
 
+        // Initialize Guzzle client if available
         if ($useGuzzle && class_exists(Client::class)) {
             $this->client = new Client();
         }
+
+        // Set up internal logging with Monolog
+        $logger = new Logger('APIStash');
+        $logger->pushHandler(new StreamHandler(__DIR__ . '/../../logs/api_stash.log', Logger::ERROR));
+
+        // Initialize ErrorHandler with logger, retry limit, and fallback response
+        $this->errorHandler = new ErrorHandler($logger, $retryLimit, $fallbackResponse);
     }
 
     /**
@@ -31,15 +43,15 @@ class ApiRequestHandler
     }
 
     /**
-     * Makes a single API request.
+     * Makes a single API request with retry logic.
      * 
      * @param string $url API endpoint.
      * @param string $method HTTP method (GET, POST, etc.).
      * @param array $params Query parameters.
      * @param array $headers Request headers.
      * @param mixed $body Request body data.
-     * @return mixed API response data.
-     * @throws \Exception if request fails.
+     * @return mixed API response data or fallback response.
+     * @throws \Exception if request fails after all retries.
      */
     public function makeRequest($url, $method = 'GET', $params = [], $headers = [], $body = null)
     {
@@ -49,7 +61,7 @@ class ApiRequestHandler
             $headers['Authorization'] = 'Bearer ' . $this->apiKey;
         }
 
-        try {
+        $callback = function () use ($urlWithQuery, $method, $headers, $body) {
             if ($this->useGuzzle && $this->client) {
                 return $this->makeGuzzleRequest($urlWithQuery, $method, $headers, $body);
             } elseif (function_exists('curl_init')) {
@@ -57,13 +69,14 @@ class ApiRequestHandler
             } else {
                 return $this->makeFileGetContentsRequest($urlWithQuery, $method, $headers, $body);
             }
-        } catch (\Exception $e) {
-            throw new \Exception("API request failed: " . $e->getMessage());
-        }
+        };
+
+        // Use ErrorHandler to retry the request in case of failure
+        return $this->errorHandler->retry($callback);
     }
 
     /**
-     * Makes a batch of API requests.
+     * Makes a batch of API requests with retry logic.
      * 
      * @param array $requests Array of request configurations.
      * @return array Array of responses from each API request.
@@ -73,13 +86,17 @@ class ApiRequestHandler
         $responses = [];
 
         foreach ($requests as $request) {
-            $responses[] = $this->makeRequest(
-                $request['url'],
-                $request['method'] ?? 'GET',
-                $request['params'] ?? [],
-                $request['headers'] ?? [],
-                $request['body'] ?? null
-            );
+            $callback = function () use ($request) {
+                return $this->makeRequest(
+                    $request['url'],
+                    $request['method'] ?? 'GET',
+                    $request['params'] ?? [],
+                    $request['headers'] ?? [],
+                    $request['body'] ?? null
+                );
+            };
+
+            $responses[] = $this->errorHandler->retry($callback);
         }
 
         return $responses;
