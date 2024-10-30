@@ -2,21 +2,13 @@
 
 require 'vendor/autoload.php';
 
-use StashQuiver\DataCompressor;
+use StashQuiver\FormatHandler;
 
-$dataCompressor = new DataCompressor;
+$formatHandler = new FormatHandler;
+$jsonData = '{"name": "John", "email": "john@example.com"}';
+$xmlData = '<user><name>John</name><email>john@example.com</email></user>';
+$htmlData = '<html><head><title>Test</title></head><body>Example</body></html>';
 
-// Original data (e.g., an API response)
-$data = [
-    'name' => 'John Doe',
-    'email' => 'john@example.com',
-    'roles' => ['admin', 'editor']
-];
-
-// Compress the data
-$compressedData = $dataCompressor->compress($data);
-echo "Compressed Data: " . $compressedData . "\n";
-
-// Decompress the data
-$decompressedData = $dataCompressor->decompress($compressedData);
-print_r($decompressedData);
+echo $formatHandler->validate($jsonData, 'json') ? "Valid JSON\n" : "Invalid JSON\n";
+echo $formatHandler->validate($xmlData, 'xml') ? "Valid XML\n" : "Invalid XML\n";
+echo $formatHandler->validate($htmlData, 'html') ? "Valid HTML\n" : "Invalid HTML\n";
