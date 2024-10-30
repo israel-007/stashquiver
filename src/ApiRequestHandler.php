@@ -1,6 +1,7 @@
 <?php
 namespace StashQuiver;
 
+use StashQuiver\FormatHandler;
 use StashQuiver\RateLimiter;
 use StashQuiver\ErrorHandler;
 use GuzzleHttp\Client;
@@ -15,8 +16,9 @@ class ApiRequestHandler
     private $useGuzzle;
     private $errorHandler;
     private $rateLimiter;
+    private $formatHandler;
 
-    public function __construct($apiKey = null, $useGuzzle = false, $retryLimit = 3, $fallbackResponse = 'Fallback Response', RateLimiter $rateLimiter = null)
+    public function __construct($apiKey = null, $useGuzzle = false, $retryLimit = 3, $fallbackResponse = 'Fallback Response', RateLimiter $rateLimiter = null, FormatHandler $formatHandler = null)
     {
         $this->apiKey = $apiKey;
         $this->useGuzzle = $useGuzzle;
@@ -25,25 +27,27 @@ class ApiRequestHandler
             $this->client = new Client();
         }
 
-        $logger = new Logger('APIStash');
-        $logger->pushHandler(new StreamHandler(__DIR__ . '/../../logs/api_stash.log', Logger::ERROR));
+        $logger = new Logger('StashQuiver');
+        $logger->pushHandler(new StreamHandler(__DIR__ . '/../logs/Stash_Quiver.log', Logger::ERROR));
 
         $this->errorHandler = new ErrorHandler($logger, $retryLimit, $fallbackResponse);
-        $this->rateLimiter = $rateLimiter ?? new RateLimiter(60, 60); // Default 60 requests per minute
+        $this->rateLimiter = $rateLimiter ?? new RateLimiter(60, 60);
+        $this->formatHandler = $formatHandler ?? new FormatHandler();
     }
 
     /**
-     * Makes a single API request with retry and rate limit logic.
+     * Makes a single API request and parses the response.
      * 
      * @param string $url API endpoint.
      * @param string $method HTTP method (GET, POST, etc.).
      * @param array $params Query parameters.
      * @param array $headers Request headers.
      * @param mixed $body Request body data.
-     * @return mixed API response data or fallback response.
-     * @throws \Exception if request fails after all retries or rate limit exceeded.
+     * @param string|null $expectedFormat Optional expected format ('json', 'xml', 'html').
+     * @return mixed Parsed response data or fallback response.
+     * @throws \Exception if request fails after retries or rate limit exceeded.
      */
-    public function makeRequest($url, $method = 'GET', $params = [], $headers = [], $body = null)
+    public function makeRequest($url, $method = 'GET', $params = [], $headers = [], $body = null, $expectedFormat = null)
     {
         if (!$this->rateLimiter->allowRequest()) {
             throw new \Exception("Rate limit exceeded. Please wait before making more requests.");
@@ -55,14 +59,22 @@ class ApiRequestHandler
             $headers['Authorization'] = 'Bearer ' . $this->apiKey;
         }
 
-        $callback = function () use ($urlWithQuery, $method, $headers, $body) {
+        $callback = function () use ($urlWithQuery, $method, $headers, $body, $expectedFormat) {
             if ($this->useGuzzle && $this->client) {
-                return $this->makeGuzzleRequest($urlWithQuery, $method, $headers, $body);
+                $response = $this->makeGuzzleRequest($urlWithQuery, $method, $headers, $body);
             } elseif (function_exists('curl_init')) {
-                return $this->makeCurlRequest($urlWithQuery, $method, $headers, $body);
+                $response = $this->makeCurlRequest($urlWithQuery, $method, $headers, $body);
             } else {
-                return $this->makeFileGetContentsRequest($urlWithQuery, $method, $headers, $body);
+                $response = $this->makeFileGetContentsRequest($urlWithQuery, $method, $headers, $body);
             }
+
+            // Validate and parse response
+            $format = $expectedFormat ?? $this->formatHandler->detectFormat($response);
+            if ($format && $this->formatHandler->validate($response, $format)) {
+                return $this->formatHandler->parse($response, $format);
+            }
+
+            return $response; // Return raw response if parsing fails
         };
 
         return $this->errorHandler->retry($callback);
