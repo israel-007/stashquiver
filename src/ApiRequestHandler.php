@@ -1,6 +1,7 @@
 <?php
 namespace StashQuiver;
 
+use StashQuiver\CacheManager;
 use StashQuiver\FormatHandler;
 use StashQuiver\RateLimiter;
 use StashQuiver\ErrorHandler;
@@ -12,14 +13,29 @@ use Monolog\Handler\StreamHandler;
 class ApiRequestHandler
 {
     private $client;
-    private $apiKey;
+    protected $apiKey;
     private $useGuzzle;
     private $errorHandler;
-    private $rateLimiter;
-    private $formatHandler;
+    protected $rateLimiter;
+    protected $cacheManager;
 
-    public function __construct($apiKey = null, $useGuzzle = false, $retryLimit = 3, $fallbackResponse = 'Fallback Response', RateLimiter $rateLimiter = null, FormatHandler $formatHandler = null)
-    {
+
+    // private $client;
+    // protected $apiKey;
+    // private $useGuzzle;
+    // protected $errorHandler;
+    // protected $rateLimiter;
+    protected $formatHandler;
+    // protected $cacheManager;
+
+    public function __construct(
+        $apiKey = null,
+        $useGuzzle = false,
+        $retryLimit = 3,
+        $fallbackResponse = 'Fallback Response',
+        RateLimiter $rateLimiter = null,
+        CacheManager $cacheManager = null
+    ) {
         $this->apiKey = $apiKey;
         $this->useGuzzle = $useGuzzle;
 
@@ -27,57 +43,95 @@ class ApiRequestHandler
             $this->client = new Client();
         }
 
-        $logger = new Logger('StashQuiver');
-        $logger->pushHandler(new StreamHandler(__DIR__ . '/../logs/Stash_Quiver.log', Logger::ERROR));
+        // Set up default components if not provided
+        $logger = new Logger('APIStash');
+        $logger->pushHandler(new StreamHandler(__DIR__ . '/../../logs/api_stash.log', Logger::ERROR));
 
         $this->errorHandler = new ErrorHandler($logger, $retryLimit, $fallbackResponse);
         $this->rateLimiter = $rateLimiter ?? new RateLimiter(60, 60);
-        $this->formatHandler = $formatHandler ?? new FormatHandler();
+        $this->cacheManager = $cacheManager ?? new CacheManager();
     }
 
     /**
-     * Makes a single API request and parses the response.
+     * Makes a single API request with retry, rate limit, and caching.
      * 
      * @param string $url API endpoint.
      * @param string $method HTTP method (GET, POST, etc.).
      * @param array $params Query parameters.
      * @param array $headers Request headers.
      * @param mixed $body Request body data.
-     * @param string|null $expectedFormat Optional expected format ('json', 'xml', 'html').
-     * @return mixed Parsed response data or fallback response.
+     * @param bool $cache Whether to cache the response.
+     * @return mixed Raw response data or fallback response.
      * @throws \Exception if request fails after retries or rate limit exceeded.
      */
-    public function makeRequest($url, $method = 'GET', $params = [], $headers = [], $body = null, $expectedFormat = null)
-    {
+    public function makeRequest(
+        $url,
+        $method = 'GET',
+        $params = [],
+        $headers = [],
+        $body = null,
+        $cache = true
+    ) {
         if (!$this->rateLimiter->allowRequest()) {
             throw new \Exception("Rate limit exceeded. Please wait before making more requests.");
         }
 
+        // Generate unique cache key based on request details
+        $cacheKey = $this->generateCacheKey($url, $method, $params, $headers, $body);
+
+        // Check cache for response if caching is enabled
+        if ($cache && ($cachedResponse = $this->cacheManager->retrieve($cacheKey)) !== null) {
+            return $cachedResponse;
+        }
+
+        // Prepare full URL with query parameters
         $urlWithQuery = $url . '?' . http_build_query($params);
 
+        // Add API key to headers if provided
         if ($this->apiKey) {
             $headers['Authorization'] = 'Bearer ' . $this->apiKey;
         }
 
-        $callback = function () use ($urlWithQuery, $method, $headers, $body, $expectedFormat) {
-            if ($this->useGuzzle && $this->client) {
-                $response = $this->makeGuzzleRequest($urlWithQuery, $method, $headers, $body);
-            } elseif (function_exists('curl_init')) {
-                $response = $this->makeCurlRequest($urlWithQuery, $method, $headers, $body);
-            } else {
-                $response = $this->makeFileGetContentsRequest($urlWithQuery, $method, $headers, $body);
+        // Define the request callback
+        $callback = function () use ($urlWithQuery, $method, $headers, $body, $cacheKey, $cache) {
+            // Make the HTTP request using the appropriate method
+            $response = $this->useGuzzle && $this->client ?
+                $this->makeGuzzleRequest($urlWithQuery, $method, $headers, $body) :
+                (function_exists('curl_init') ? $this->makeCurlRequest($urlWithQuery, $method, $headers, $body) :
+                    $this->makeFileGetContentsRequest($urlWithQuery, $method, $headers, $body));
+
+            // Cache response if caching is enabled
+            if ($cache) {
+                $this->cacheManager->store($cacheKey, $response, 3600); // Cache for 1 hour
             }
 
-            // Validate and parse response
-            $format = $expectedFormat ?? $this->formatHandler->detectFormat($response);
-            if ($format && $this->formatHandler->validate($response, $format)) {
-                return $this->formatHandler->parse($response, $format);
-            }
-
-            return $response; // Return raw response if parsing fails
+            return $response; // Return raw response
         };
 
+        // Use ErrorHandler to retry the request if it fails
         return $this->errorHandler->retry($callback);
+    }
+
+    /**
+     * Generates a unique cache key based on the API request parameters.
+     * 
+     * @param string $url API endpoint.
+     * @param string $method HTTP method.
+     * @param array $params Query parameters.
+     * @param array $headers Request headers.
+     * @param mixed $body Request body data.
+     * @return string The unique cache key.
+     */
+    private function generateCacheKey($url, $method, $params, $headers, $body)
+    {
+        $keyString = serialize([
+            'url' => $url,
+            'method' => $method,
+            'params' => $params,
+            'headers' => $headers,
+            'body' => $body
+        ]);
+        return md5($keyString);
     }
 
     /**
