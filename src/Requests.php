@@ -7,7 +7,7 @@ use StashQuiver\CacheManager;
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 
-class ApiRequestBuilder extends ApiRequestHandler
+class Requests extends ApiRequestHandler
 {
     private $url;
     private $method = 'GET';

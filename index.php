@@ -2,11 +2,9 @@
 
 require 'vendor/autoload.php';
 
-use StashQuiver\ApiRequestBuilder;
+use StashQuiver\Requests;
 
-$request = new ApiRequestBuilder();
+$request = new Requests();
 
-echo ($request->url('https://catfact.ninja/fact')
-            ->send());
-
+echo $request->url('https://catfact.ninja/fact')->send();
 
