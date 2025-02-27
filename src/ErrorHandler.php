@@ -9,30 +9,58 @@ class ErrorHandler
     private $logger;
     private $retryLimit;
     private $fallbackResponse;
+    private $retryDelay;
+    private $backoffStrategy;
 
-    public function __construct(LoggerInterface $logger = null, $retryLimit = 3, $fallbackResponse = null)
-    {
-        // Use a null logger if no logger is provided (avoids errors when logging isn't set up)
+    /**
+     * Initializes the ErrorHandler.
+     * 
+     * @param LoggerInterface|null $logger Logging instance (PSR-3 compatible).
+     * @param int $retryLimit Number of retries before returning fallback response.
+     * @param mixed $fallbackResponse Default fallback response if retries fail.
+     * @param int $retryDelay Initial retry delay in seconds (default: 1 second).
+     * @param string $backoffStrategy Backoff strategy ('fixed', 'exponential', 'linear').
+     */
+    public function __construct(
+        LoggerInterface $logger = null,
+        int $retryLimit = 3,
+        $fallbackResponse = null,
+        int $retryDelay = 1,
+        string $backoffStrategy = 'exponential'
+    ) {
         $this->logger = $logger ?: new NullLogger();
         $this->retryLimit = $retryLimit;
         $this->fallbackResponse = $fallbackResponse;
+        $this->retryDelay = $retryDelay;
+        $this->backoffStrategy = $backoffStrategy;
     }
 
     /**
      * Logs an error.
-     *
-     * @param string $message Error to log.
+     * 
+     * @param string $message Error message.
+     * @param string $level Log level (error, warning, debug).
      */
-    public function logError($message)
+    public function logError($message, $level = 'error')
     {
-        $this->logger->error($message);
+        switch ($level) {
+            case 'warning':
+                $this->logger->warning($message);
+                break;
+            case 'debug':
+                $this->logger->debug($message);
+                break;
+            default:
+                $this->logger->error($message);
+                break;
+        }
     }
 
     /**
-     * General error handling, optionally logging errors.
-     *
+     * Handles an exception, logging it with an optional context.
+     * 
      * @param \Exception $exception Exception to handle.
-     * @param string $context Optional context for the error.
+     * @param string $context Optional context message.
      */
     public function handleError(\Exception $exception, $context = '')
     {
@@ -41,36 +69,98 @@ class ErrorHandler
     }
 
     /**
-     * Retry a function a specified number of times.
-     *
+     * Retries a callable function up to a defined limit, with delay and backoff strategies.
+     * 
      * @param callable $callback Function to retry.
-     * @param int|null $retryLimit Number of retry attempts.
-     * @return mixed Result of the function or fallback response.
+     * @param int|null $retryLimit Custom retry limit (overrides constructor setting).
+     * @return mixed Result of function or fallback response.
      */
-    public function retry(callable $callback, $retryLimit = null)
+    public function retry(callable $callback, int $retryLimit = null)
     {
         $attempts = $retryLimit ?? $this->retryLimit;
+        $delay = $this->retryDelay;
         $lastException = null;
 
-        for ($i = 0; $i < $attempts; $i++) {
+        for ($i = 1; $i <= $attempts; $i++) {
             try {
-                return $callback();
+                $result = $callback();
+                if ($i > 1) {
+                    $this->logError("✅ Retry succeeded on attempt $i", 'debug');
+                }
+                return $result;
             } catch (\Exception $e) {
                 $lastException = $e;
-                $this->logError("Attempt " . ($i + 1) . " failed: " . $e->getMessage());
+                $this->logError("❌ Attempt $i failed: " . $e->getMessage());
+
+                if ($i < $attempts) {
+                    sleep($delay);
+                    $delay = $this->calculateNextDelay($delay);
+                }
             }
         }
 
-        // Log final failure and return fallback response if set
-        $this->logError("All retry attempts failed. Returning fallback response.");
-        return $this->fallbackResponse ?? null;
+        // Log final failure and return fallback response
+        $this->logError("⚠️ All retry attempts failed. Returning fallback response.");
+        return $this->fallbackResponse ?? $lastException;
     }
 
     /**
-     * Provides a default fallback response when an API call fails completely.
-     *
-     * @return mixed The fallback response, or null if not set.
+     * Calculates the next retry delay based on the chosen backoff strategy.
+     * 
+     * @param int $currentDelay Current delay in seconds.
+     * @return int Next delay in seconds.
      */
+    private function calculateNextDelay(int $currentDelay): int
+    {
+        switch ($this->backoffStrategy) {
+            case 'linear':
+                return $currentDelay + $this->retryDelay;
+            case 'exponential':
+                return $currentDelay * 2;
+            case 'fixed':
+            default:
+                return $this->retryDelay;
+        }
+    }
+
+    /**
+     * Sets a custom retry delay.
+     * 
+     * @param int $seconds Delay in seconds.
+     * @return self
+     */
+    public function setRetryDelay(int $seconds)
+    {
+        $this->retryDelay = $seconds;
+        return $this;
+    }
+
+    /**
+     * Sets the backoff strategy.
+     * 
+     * @param string $strategy 'fixed', 'linear', or 'exponential'.
+     * @return self
+     */
+    public function setBackoffStrategy(string $strategy)
+    {
+        $this->backoffStrategy = in_array($strategy, ['fixed', 'linear', 'exponential'])
+            ? $strategy
+            : 'exponential';
+        return $this;
+    }
+
+    /**
+     * Sets the fallback response.
+     * 
+     * @param mixed $response Fallback response.
+     * @return self
+     */
+    public function setFallbackResponse($response)
+    {
+        $this->fallbackResponse = $response;
+        return $this;
+    }
+
     public function getFallbackResponse()
     {
         return $this->fallbackResponse;

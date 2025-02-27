@@ -2,146 +2,197 @@
 namespace StashQuiver;
 
 use StashQuiver\DataCompressor;
+use Redis;
+use RuntimeException;
 
 class CacheManager
 {
     private $cacheDir;
     private $maxSize;
     private $dataCompressor;
+    private $storageBackend;
+    private $memoryCache = [];
+    private $redis;
 
     /**
-     * Initializes the CacheManager with file-based caching.
-     * 
+     * Initializes the CacheManager with flexible storage options.
+     *
      * @param string $cacheDir The directory where cache files will be stored.
      * @param int|null $maxSize The maximum number of entries allowed in the cache.
-     * @param DataCompressor|bool $dataCompressor An optional DataCompressor instance for compressing cached data.
+     * @param DataCompressor|bool $dataCompressor An optional DataCompressor instance.
+     * @param string $storageBackend Storage backend ('file', 'memory', 'redis').
+     * @param array|null $redisConfig Redis configuration (host, port, etc.).
      */
-    public function __construct($dataCompressor = true, $maxSize = 20, $cacheDir = __DIR__ . '/cache')
+    public function __construct($dataCompressor = true, $maxSize = 20, $cacheDir = __DIR__ . '/cache', $storageBackend = 'file', $redisConfig = null)
     {
         $this->cacheDir = rtrim($cacheDir, DIRECTORY_SEPARATOR);
         $this->maxSize = $maxSize;
         $this->dataCompressor = ($dataCompressor) ? new DataCompressor() : false;
+        $this->storageBackend = $storageBackend;
 
-        if (!is_dir($this->cacheDir)) {
+        if ($storageBackend === 'file' && !is_dir($this->cacheDir)) {
             mkdir($this->cacheDir, 0755, true);
         }
+
+        // if ($storageBackend === 'redis' && $redisConfig) {
+        //     $this->redis = new Redis();
+        //     $this->redis->connect($redisConfig['host'], $redisConfig['port']);
+        //     if (isset($redisConfig['auth'])) {
+        //         $this->redis->auth($redisConfig['auth']);
+        //     }
+        // }
     }
 
     /**
-     * Stores data in a file-based cache with an expiration time.
-     * 
-     * @param string $key Unique identifier for the cache entry.
+     * Stores data in the selected cache storage with expiration time.
+     *
+     * @param string $key Unique cache key.
      * @param mixed $data Data to cache.
      * @param int $expiration Expiration time in seconds.
      */
     public function store($key, $data, $expiration = 3600)
     {
-        $filePath = $this->getFilePath($key);
         $expiresAt = time() + $expiration;
-
-        // Prepare the cache entry as JSON before compression
         $cacheEntry = json_encode(['data' => $data, 'expires_at' => $expiresAt]);
+
         if ($cacheEntry === false) {
-            throw new \RuntimeException("Failed to encode cache data for key: $key");
+            throw new RuntimeException("Failed to encode cache data for key: $key");
         }
 
-        // Compress the JSON-encoded cache entry if DataCompressor is enabled
         if ($this->dataCompressor) {
             $cacheEntry = $this->dataCompressor->compress($cacheEntry);
-            if ($cacheEntry === false) {
-                throw new \RuntimeException("Failed to compress data for key: $key");
-            }
         }
 
-        // Write the compressed data to the cache file
-        $result = file_put_contents($filePath, $cacheEntry);
-        if ($result === false) {
-            throw new \RuntimeException("Failed to write cache file for key: $key at path: $filePath");
-        }
-
-        // Evict old entries if maxSize is defined
-        if ($this->maxSize) {
-            $this->evictOldEntries();
+        switch ($this->storageBackend) {
+            case 'file':
+                file_put_contents($this->getFilePath($key), $cacheEntry);
+                $this->evictOldEntries();
+                break;
+            case 'memory':
+                $this->memoryCache[$key] = ['data' => $cacheEntry, 'expires_at' => $expiresAt];
+                break;
+            case 'redis':
+                $this->redis->setex($key, $expiration, $cacheEntry);
+                break;
         }
     }
 
     /**
-     * Retrieves cached data from a file if it exists and is not expired.
-     * 
-     * @param string $key The unique identifier for the cache entry.
-     * @return mixed|null The cached data if valid, or null if expired/not found.
+     * Retrieves cached data if valid.
+     *
+     * @param string $key The unique cache key.
+     * @param bool $raw Whether to return raw compressed data.
+     * @return mixed|null Cached data, raw data, or null if expired/not found.
      */
-    public function retrieve($key)
+    public function retrieve($key, $raw = false)
     {
-        $filePath = $this->getFilePath($key);
-
-        if (!file_exists($filePath)) {
-            return null; // Cache miss
+        switch ($this->storageBackend) {
+            case 'file':
+                if (!file_exists($this->getFilePath($key)))
+                    return null;
+                $cacheEntry = file_get_contents($this->getFilePath($key));
+                break;
+            case 'memory':
+                $cacheEntry = $this->memoryCache[$key]['data'] ?? null;
+                break;
+            case 'redis':
+                $cacheEntry = $this->redis->get($key);
+                break;
         }
 
-        // Read the file and decompress if necessary
-        $cacheEntry = file_get_contents($filePath);
-        if ($this->dataCompressor) {
+        if (!$cacheEntry)
+            return null;
+
+        if ($this->dataCompressor && !$raw) {
             $cacheEntry = $this->dataCompressor->decompress($cacheEntry);
-            if ($cacheEntry === false) {
-                unlink($filePath); // Remove corrupted entry
-                return null;
-            }
         }
 
-        // Decode the JSON data after decompression
         $cacheEntry = json_decode($cacheEntry, true);
-        if ($cacheEntry === null || !isset($cacheEntry['expires_at']) || $cacheEntry['expires_at'] < time()) {
-            unlink($filePath); // Remove expired or invalid entry
+        if ($cacheEntry === null || $cacheEntry['expires_at'] < time()) {
+            $this->clear($key);
             return null;
         }
 
-        return $cacheEntry['data'];
+        return $raw ? $cacheEntry : $cacheEntry['data'];
     }
 
     /**
-     * Clears a specific cache entry or all entries in the cache directory.
-     * 
-     * @param string|null $key The cache key to clear; clears all if null.
+     * Checks if a cache entry exists.
+     *
+     * @param string $key Cache key.
+     * @return bool True if cache exists, false otherwise.
+     */
+    public function exists($key)
+    {
+        switch ($this->storageBackend) {
+            case 'file':
+                return file_exists($this->getFilePath($key));
+            case 'memory':
+                return isset($this->memoryCache[$key]);
+            case 'redis':
+                return $this->redis->exists($key);
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Clears a specific cache entry or all entries.
+     *
+     * @param string|null $key Cache key (null clears everything).
      */
     public function clear($key = null)
     {
         if ($key) {
-            $filePath = $this->getFilePath($key);
-            if (file_exists($filePath)) {
-                unlink($filePath);
+            switch ($this->storageBackend) {
+                case 'file':
+                    unlink($this->getFilePath($key));
+                    break;
+                case 'memory':
+                    unset($this->memoryCache[$key]);
+                    break;
+                case 'redis':
+                    $this->redis->del($key);
+                    break;
             }
         } else {
-            array_map('unlink', glob("{$this->cacheDir}/*"));
+            switch ($this->storageBackend) {
+                case 'file':
+                    array_map('unlink', glob("{$this->cacheDir}/*"));
+                    break;
+                case 'memory':
+                    $this->memoryCache = [];
+                    break;
+                case 'redis':
+                    $this->redis->flushDB();
+                    break;
+            }
         }
     }
 
     /**
-     * Evicts oldest entries if the maxSize limit is reached.
+     * Evicts old cache entries when maxSize is exceeded (for file-based caching).
      */
     private function evictOldEntries()
     {
-        $files = glob("{$this->cacheDir}/*");
-
-        if (count($files) <= $this->maxSize) {
+        if ($this->storageBackend !== 'file')
             return;
-        }
 
-        usort($files, function ($a, $b) {
-            return filemtime($a) - filemtime($b);
-        });
+        $files = glob("{$this->cacheDir}/*");
+        if (count($files) <= $this->maxSize)
+            return;
 
-        $filesToDelete = array_slice($files, 0, count($files) - $this->maxSize);
-        foreach ($filesToDelete as $file) {
+        usort($files, fn($a, $b) => filemtime($a) - filemtime($b));
+        foreach (array_slice($files, 0, count($files) - $this->maxSize) as $file) {
             unlink($file);
         }
     }
 
     /**
-     * Generates a unique file path for a given cache key.
-     * 
-     * @param string $key The cache key.
-     * @return string The file path for storing the cache entry.
+     * Generates a unique file path for a cache key.
+     *
+     * @param string $key Cache key.
+     * @return string File path.
      */
     private function getFilePath($key)
     {

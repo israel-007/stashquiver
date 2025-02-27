@@ -1,66 +1,92 @@
 <?php
 namespace StashQuiver;
 
+use SplQueue;
+
 class RateLimiter
 {
     private $limit;
     private $window;
-    private $requestTimestamps = [];
+    private $requests;
+    private $storageFile;
 
     /**
-     * Initializes the RateLimiter with a limit and time window.
+     * Initializes the RateLimiter with a limit, time window, and optional persistent storage.
      *
      * @param int $limit The maximum number of requests allowed.
      * @param int $window The time window in seconds.
+     * @param string|null $storageFile Optional file path for persistent rate limiting.
      */
-    public function __construct($limit = 60, $window = 60)
+    public function __construct($limit = 60, $window = 60, $storageFile = __DIR__ . '/rate_limits/rate_limit_data.txt')
     {
         $this->limit = $limit;
         $this->window = $window;
+        $this->requests = new SplQueue();
+        $this->storageFile = $storageFile;
+
+        if ($storageFile) {
+            $this->loadRequests();
+        }
     }
 
     /**
      * Checks if a request is allowed based on the rate limit.
      *
-     * @return bool True if the request is allowed; false if rate limit is exceeded.
+     * @return bool True if the request is allowed; otherwise, it waits or denies the request.
      */
     public function allowRequest()
     {
         $currentTime = time();
 
-        // Remove timestamps that are outside the current window
-        $this->cleanUpOldRequests($currentTime);
+        // Remove expired timestamps
+        while (!$this->requests->isEmpty() && ($currentTime - $this->requests->bottom()) >= $this->window) {
+            $this->requests->dequeue();
+        }
 
-        if (count($this->requestTimestamps) < $this->limit) {
-            $this->incrementRequestCount($currentTime);
+        if ($this->requests->count() < $this->limit) {
+            $this->requests->enqueue($currentTime);
+            $this->saveRequests(); // Persist timestamps
             return true;
         }
 
-        return false;
+        // If rate limit exceeded, wait for the oldest request to expire
+        $waitTime = ($this->requests->bottom() + $this->window) - $currentTime;
+        if ($waitTime > 0) {
+            sleep($waitTime);
+        }
+
+        return $this->allowRequest(); // Retry after waiting
     }
 
     /**
-     * Increments the request count for the current time window.
-     *
-     * @param int $timestamp The current timestamp.
+     * Resets the rate limiter manually.
      */
-    private function incrementRequestCount($timestamp)
+    public function reset()
     {
-        $this->requestTimestamps[] = $timestamp;
+        $this->requests = new SplQueue();
+        if ($this->storageFile) {
+            file_put_contents($this->storageFile, serialize($this->requests));
+        }
     }
 
     /**
-     * Removes timestamps outside the current time window.
-     *
-     * @param int $currentTime The current timestamp.
+     * Loads rate limit data from a persistent storage file.
      */
-    private function cleanUpOldRequests($currentTime)
+    private function loadRequests()
     {
-        $this->requestTimestamps = array_filter(
-            $this->requestTimestamps,
-            function ($timestamp) use ($currentTime) {
-                return ($currentTime - $timestamp) < $this->window;
-            }
-        );
+        if (file_exists($this->storageFile)) {
+            $data = file_get_contents($this->storageFile);
+            $this->requests = unserialize($data) ?: new SplQueue();
+        }
+    }
+
+    /**
+     * Saves the rate limit data to persistent storage.
+     */
+    private function saveRequests()
+    {
+        if ($this->storageFile) {
+            file_put_contents($this->storageFile, serialize($this->requests));
+        }
     }
 }

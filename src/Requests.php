@@ -1,4 +1,4 @@
-<?php 
+<?php
 
 namespace StashQuiver;
 
@@ -22,140 +22,59 @@ class Requests extends ApiRequestHandler
     /**
      * Initializes optional dependencies with default values.
      */
-    public function __construct()
+    public function __construct($apiKey = null, $useGuzzle = false)
     {
-        parent::__construct();
-        $this->rateLimiter([5, 60]);       // Default rate limit
-        $this->cacheManager(true);         // Default to using CacheManager
+        parent::__construct($apiKey, $useGuzzle);
+        $this->rateLimiter([5, 60]);
+        $this->cacheManager(true);
     }
 
-    /**
-     * Sets the API endpoint URL.
-     * 
-     * @param string $url The API endpoint URL.
-     * @return self
-     */
     public function url($url)
     {
         $this->url = $url;
         return $this;
     }
-
-    /**
-     * Sets the HTTP method (GET, POST, etc.).
-     * 
-     * @param string $method The HTTP method.
-     * @return self
-     */
     public function method($method = 'GET')
     {
         $this->method = strtoupper($method);
         return $this;
     }
-
-    /**
-     * Sets the query parameters.
-     * 
-     * @param array $params Associative array of query parameters.
-     * @return self
-     */
     public function params(array $params = [])
     {
         $this->params = $params;
         return $this;
     }
-
-    /**
-     * Sets the request headers.
-     * 
-     * @param array $headers Associative array of headers.
-     * @return self
-     */
     public function headers(array $headers = [])
     {
         $this->headers = $headers;
         return $this;
     }
-
-    /**
-     * Sets the request body data.
-     * 
-     * @param mixed $body The request body data.
-     * @return self
-     */
     public function body($body = null)
     {
         $this->body = $body;
         return $this;
     }
-
-    /**
-     * Sets the expected response format (json, xml, html).
-     * 
-     * @param string $format The expected response format.
-     * @return self
-     */
-    public function format(string $format = 'json')
-    {
-        $this->expectedFormat = strtolower($format);
-        return $this;
-    }
-
-    /**
-     * Enables or disables caching for this request.
-     * 
-     * @param bool $cache True to enable caching, false to disable.
-     * @return self
-     */
     public function useCache($cache = true)
     {
         $this->cache = $cache;
         return $this;
     }
-
-    /**
-     * Sets the API key.
-     * 
-     * @param string $apiKey API key for authentication.
-     * @return self
-     */
     public function apiKey($apiKey = null)
     {
         $this->apiKey = $apiKey;
         return $this;
     }
-
-    /**
-     * Sets the retry limit for the request.
-     * 
-     * @param int $retryLimit Number of retries for failed requests.
-     * @return self
-     */
     public function retryLimit(int $retryLimit = 3)
     {
         $this->retryLimit = $retryLimit;
         return $this;
     }
-
-    /**
-     * Sets the fallback response if retries fail.
-     * 
-     * @param mixed $fallbackResponse The fallback response.
-     * @return self
-     */
-    public function fallbackResponse(string $fallbackResponse = 'Error: Retry limit reached')
+    public function fallbackResponse(string $fallbackResponse = 'Error: An error occured while making request.')
     {
         $this->fallbackResponse = $fallbackResponse;
         return $this;
     }
-
-    /**
-     * Configures the rate limiter with the given settings.
-     * 
-     * @param array $settings Rate limit settings [maxRequests, periodInSeconds].
-     * @return self
-     */
-    public function rateLimiter(array $settings = [5, 60])
+    public function rateLimiter(array $settings = [10, 60])
     {
         [$maxRequests, $periodInSeconds] = $settings;
         $this->rateLimiter = new RateLimiter($maxRequests, $periodInSeconds);
@@ -164,26 +83,20 @@ class Requests extends ApiRequestHandler
 
     /**
      * Enables or disables the CacheManager.
-     * 
-     * @param bool $useCacheManager True to enable CacheManager, false to disable.
-     * @return self
      */
-    private function cacheManager($useCacheManager = [])
+    public function cacheManager(bool $useCacheManager = true)
     {
         $this->cacheManager = $useCacheManager ? new CacheManager() : null;
         return $this;
     }
 
     /**
-     * Executes the API request with the specified configuration.
-     * 
-     * @return mixed The response from the API.
+     * Executes the API request.
      */
     public function send()
     {
-        // Initialize ErrorHandler with logger and configurations
         $logger = new Logger('StashQuiver');
-        $logger->pushHandler(new StreamHandler(__DIR__ . 'logs/stash_quiver.log', Logger::ERROR));
+        $logger->pushHandler(new StreamHandler(__DIR__ . '/logs/stash_quiver.log', Logger::ERROR));
 
         return $this->makeRequest(
             $this->url,
@@ -193,5 +106,13 @@ class Requests extends ApiRequestHandler
             $this->body,
             $this->cache
         );
+    }
+
+    /**
+     * Alias for send() to improve readability.
+     */
+    public function execute()
+    {
+        return $this->send();
     }
 }
